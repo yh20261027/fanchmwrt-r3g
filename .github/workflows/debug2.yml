@@ -1,0 +1,100 @@
+name: Debug 2 - find the hidden kconfig gate
+
+on:
+  workflow_dispatch:
+
+env:
+  FANCHMWRT_REPO: https://github.com/fanchmwrt/fanchmwrt.git
+  FANCHMWRT_BRANCH: fanchmwrt-25.12.6
+
+jobs:
+  debug:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev \
+            python3-distutils python3-pyelftools python3-setuptools \
+            rsync swig unzip zlib1g-dev time
+
+      - name: Clone FanchmWrt source
+        run: |
+          git clone --depth 1 -b "$FANCHMWRT_BRANCH" "$FANCHMWRT_REPO" openwrt
+
+      - name: Apply local overlay
+        run: |
+          cp -rv overlay/package/. openwrt/package/
+          cp -v  config/r3g.config openwrt/.config
+
+      - name: Feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds uninstall luci-app-weechat || true
+          rm -rf package/feeds/luci/luci-app-weechat
+
+      - name: Diagnose
+        working-directory: openwrt
+        run: |
+          make defconfig >/dev/null 2>&1 || true
+
+          echo "########## A. raw kconfig lines (loose grep) ##########"
+          for sym in luci-proto-qmi luci-proto-ipv6 luci-proto-wireguard libqrencode; do
+            echo "--- $sym ---"
+            grep -n "PACKAGE_$sym" tmp/.config-package.in | head -4 || echo "NOT IN FILE"
+          done
+
+          echo "########## B. full kconfig block around luci-proto-qmi ##########"
+          ln=$(grep -n "config PACKAGE_luci-proto-qmi" tmp/.config-package.in | head -1 | cut -d: -f1)
+          [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
+
+          echo "########## C. full kconfig block around luci-proto-ipv6 (works) ##########"
+          ln=$(grep -n "config PACKAGE_luci-proto-ipv6" tmp/.config-package.in | head -1 | cut -d: -f1)
+          [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
+
+          echo "########## D. force-select meta package test ##########"
+          mkdir -p package/r3g-extras
+          cat > package/r3g-extras/Makefile <<'MKEOF'
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=r3g-extras
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=1
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/r3g-extras
+  SECTION:=luci
+  CATEGORY:=LuCI
+  TITLE:=R3G forced extras (protocol UIs etc.)
+  DEPENDS:=+luci-proto-wireguard +luci-proto-qmi +luci-proto-mbim \
+           +luci-proto-ncm +luci-proto-3g +libqrencode +qrencode \
+           +luci-app-ddns
+endef
+
+define Package/r3g-extras/description
+  Meta package force-selecting R3G extras via package dependencies.
+endef
+
+$(eval $(call BuildPackage,r3g-extras))
+MKEOF
+          echo "CONFIG_PACKAGE_r3g-extras=y" >> .config
+          make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
+
+          echo "########## E. result after force-select ##########"
+          for sym in r3g-extras luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
+                     luci-proto-ncm luci-proto-3g libqrencode qrencode luci-app-ddns; do
+            echo "CONFIG_PACKAGE_$sym => $(grep -m1 "^# CONFIG_PACKAGE_$sym is not set" .config || grep -m1 "^CONFIG_PACKAGE_$sym=" .config || echo 'NO LINE')"
+          done
+
+          echo "########## F. block around luci-proto-qmi after rescan ##########"
+          ln=$(grep -n "config PACKAGE_luci-proto-qmi" tmp/.config-package.in | head -1 | cut -d: -f1)
+          [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
