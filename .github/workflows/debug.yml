@@ -1,0 +1,95 @@
+name: Debug config resolution
+
+on:
+  workflow_dispatch:
+
+env:
+  FANCHMWRT_REPO: https://github.com/fanchmwrt/fanchmwrt.git
+  FANCHMWRT_BRANCH: fanchmwrt-25.12.6
+
+jobs:
+  debug:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev \
+            python3-distutils python3-pyelftools python3-setuptools \
+            rsync swig unzip zlib1g-dev time
+
+      - name: Clone FanchmWrt source
+        run: |
+          git clone --depth 1 -b "$FANCHMWRT_BRANCH" "$FANCHMWRT_REPO" openwrt
+
+      - name: Apply local overlay
+        run: |
+          cp -rv overlay/package/. openwrt/package/
+          cp -v  config/r3g.config openwrt/.config
+
+      - name: Feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds uninstall luci-app-weechat || true
+          rm -rf package/feeds/luci/luci-app-weechat
+
+      - name: Diagnose missing symbols
+        working-directory: openwrt
+        run: |
+          echo "########## ROUND 1: defconfig with original seed ##########"
+          make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
+          for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
+                     luci-proto-ncm luci-proto-3g qrencode libqrencode \
+                     luci-app-ddns uqmi comgt comgt-ncm luci-lib-uqr ucode resolveip; do
+            echo "CONFIG_PACKAGE_$sym => $(grep "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
+          done
+
+          echo "########## Kconfig entries (depends on) ##########"
+          for sym in PACKAGE_luci-proto-wireguard PACKAGE_luci-proto-qmi PACKAGE_luci-proto-mbim PACKAGE_luci-proto-ncm PACKAGE_luci-proto-3g PACKAGE_libqrencode; do
+            echo "--- $sym ---"
+            grep -B2 -A10 "^config $sym$" tmp/.config-package.in || echo "no kconfig entry"
+          done
+
+          echo "########## Feed Makefiles (real deps at pinned commit) ##########"
+          for p in luci-proto-wireguard luci-proto-qmi luci-proto-mbim luci-proto-ncm luci-proto-3g; do
+            echo "--- $p ---"
+            grep -E "DEPENDS|TITLE" "feeds/luci/protocols/$p/Makefile" || echo "Makefile missing"
+          done
+          echo "--- qrencode (packages feed) ---"
+          find feeds/packages -maxdepth 3 -iname "*qrencode*" -type d
+          grep -E "DEPENDS|^PKG_NAME|Package/" feeds/packages/libs/qrencode/Makefile 2>/dev/null | head -15 || true
+
+          echo "########## ROUND 2: seed + candidate deps ##########"
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_comgt=y
+          CONFIG_PACKAGE_comgt-ncm=y
+          CONFIG_PACKAGE_luci-lib-uqr=y
+          CONFIG_PACKAGE_ucode=y
+          CONFIG_PACKAGE_resolveip=y
+          CONFIG_PACKAGE_libqrencode=y
+          CONFIG_PACKAGE_rpcd-mod-wireguard=y
+          EOF
+          make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
+          for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
+                     luci-proto-ncm luci-proto-3g libqrencode comgt comgt-ncm luci-lib-uqr; do
+            echo "CONFIG_PACKAGE_$sym => $(grep "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
+          done
+
+          echo "########## ROUND 3: scripts/config force enable ##########"
+          for sym in PACKAGE_luci-proto-wireguard PACKAGE_luci-proto-qmi PACKAGE_luci-proto-mbim PACKAGE_luci-proto-ncm PACKAGE_luci-proto-3g PACKAGE_libqrencode; do
+            ./scripts/config -e "$sym" || echo "scripts/config failed: $sym"
+          done
+          make oldconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" | head -20 || true
+          make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
+          for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
+                     luci-proto-ncm luci-proto-3g libqrencode; do
+            echo "CONFIG_PACKAGE_$sym => $(grep "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
+          done
