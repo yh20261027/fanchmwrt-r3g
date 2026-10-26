@@ -1,4 +1,4 @@
-name: Debug config resolution
+name: Debug 2 - find the hidden kconfig gate
 
 on:
   workflow_dispatch:
@@ -41,55 +41,60 @@ jobs:
           ./scripts/feeds uninstall luci-app-weechat || true
           rm -rf package/feeds/luci/luci-app-weechat
 
-      - name: Diagnose missing symbols
+      - name: Diagnose
         working-directory: openwrt
         run: |
-          echo "########## ROUND 1: defconfig with original seed ##########"
-          make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
-          for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
-                     luci-proto-ncm luci-proto-3g qrencode libqrencode \
-                     luci-app-ddns uqmi comgt comgt-ncm luci-lib-uqr ucode resolveip; do
-            echo "CONFIG_PACKAGE_$sym => $(grep "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
-          done
+          make defconfig >/dev/null 2>&1 || true
 
-          echo "########## Kconfig entries (depends on) ##########"
-          for sym in PACKAGE_luci-proto-wireguard PACKAGE_luci-proto-qmi PACKAGE_luci-proto-mbim PACKAGE_luci-proto-ncm PACKAGE_luci-proto-3g PACKAGE_libqrencode; do
+          echo "########## A. raw kconfig lines (loose grep) ##########"
+          for sym in luci-proto-qmi luci-proto-ipv6 luci-proto-wireguard libqrencode; do
             echo "--- $sym ---"
-            grep -B2 -A10 "^config $sym$" tmp/.config-package.in || echo "no kconfig entry"
+            grep -n "PACKAGE_$sym" tmp/.config-package.in | head -4 || echo "NOT IN FILE"
           done
 
-          echo "########## Feed Makefiles (real deps at pinned commit) ##########"
-          for p in luci-proto-wireguard luci-proto-qmi luci-proto-mbim luci-proto-ncm luci-proto-3g; do
-            echo "--- $p ---"
-            grep -E "DEPENDS|TITLE" "feeds/luci/protocols/$p/Makefile" || echo "Makefile missing"
-          done
-          echo "--- qrencode (packages feed) ---"
-          find feeds/packages -maxdepth 3 -iname "*qrencode*" -type d
-          grep -E "DEPENDS|^PKG_NAME|Package/" feeds/packages/libs/qrencode/Makefile 2>/dev/null | head -15 || true
+          echo "########## B. full kconfig block around luci-proto-qmi ##########"
+          ln=$(grep -n "config PACKAGE_luci-proto-qmi" tmp/.config-package.in | head -1 | cut -d: -f1)
+          [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
 
-          echo "########## ROUND 2: seed + candidate deps ##########"
-          cat >> .config <<'EOF'
-          CONFIG_PACKAGE_comgt=y
-          CONFIG_PACKAGE_comgt-ncm=y
-          CONFIG_PACKAGE_luci-lib-uqr=y
-          CONFIG_PACKAGE_ucode=y
-          CONFIG_PACKAGE_resolveip=y
-          CONFIG_PACKAGE_libqrencode=y
-          CONFIG_PACKAGE_rpcd-mod-wireguard=y
-          EOF
+          echo "########## C. full kconfig block around luci-proto-ipv6 (works) ##########"
+          ln=$(grep -n "config PACKAGE_luci-proto-ipv6" tmp/.config-package.in | head -1 | cut -d: -f1)
+          [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
+
+          echo "########## D. force-select meta package test ##########"
+          mkdir -p package/r3g-extras
+          cat > package/r3g-extras/Makefile <<'MKEOF'
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=r3g-extras
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=1
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/r3g-extras
+  SECTION:=luci
+  CATEGORY:=LuCI
+  TITLE:=R3G forced extras (protocol UIs etc.)
+  DEPENDS:=+luci-proto-wireguard +luci-proto-qmi +luci-proto-mbim \
+           +luci-proto-ncm +luci-proto-3g +libqrencode +qrencode \
+           +luci-app-ddns
+endef
+
+define Package/r3g-extras/description
+  Meta package force-selecting R3G extras via package dependencies.
+endef
+
+$(eval $(call BuildPackage,r3g-extras))
+MKEOF
+          echo "CONFIG_PACKAGE_r3g-extras=y" >> .config
           make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
-          for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
-                     luci-proto-ncm luci-proto-3g libqrencode comgt comgt-ncm luci-lib-uqr; do
-            echo "CONFIG_PACKAGE_$sym => $(grep "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
+
+          echo "########## E. result after force-select ##########"
+          for sym in r3g-extras luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
+                     luci-proto-ncm luci-proto-3g libqrencode qrencode luci-app-ddns; do
+            echo "CONFIG_PACKAGE_$sym => $(grep -m1 "^# CONFIG_PACKAGE_$sym is not set" .config || grep -m1 "^CONFIG_PACKAGE_$sym=" .config || echo 'NO LINE')"
           done
 
-          echo "########## ROUND 3: scripts/config force enable ##########"
-          for sym in PACKAGE_luci-proto-wireguard PACKAGE_luci-proto-qmi PACKAGE_luci-proto-mbim PACKAGE_luci-proto-ncm PACKAGE_luci-proto-3g PACKAGE_libqrencode; do
-            ./scripts/config -e "$sym" || echo "scripts/config failed: $sym"
-          done
-          make oldconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" | head -20 || true
-          make defconfig 2>&1 | grep -v "^Collecting\|^WARNING: Makefile" || true
-          for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
-                     luci-proto-ncm luci-proto-3g libqrencode; do
-            echo "CONFIG_PACKAGE_$sym => $(grep "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
-          done
+          echo "########## F. block around luci-proto-qmi after rescan ##########"
+          ln=$(grep -n "config PACKAGE_luci-proto-qmi" tmp/.config-package.in | head -1 | cut -d: -f1)
+          [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
