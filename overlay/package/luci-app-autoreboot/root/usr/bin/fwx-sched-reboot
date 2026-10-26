@@ -1,0 +1,5 @@
+#!/bin/sh
+# fanchmWrt scheduled reboot (invoked by cron)
+logger -t fwx-autoreboot "scheduled reboot triggered"
+sleep 2
+/sbin/reboot
