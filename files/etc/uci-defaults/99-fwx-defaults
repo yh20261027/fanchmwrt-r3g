@@ -1,0 +1,8 @@
+#!/bin/sh
+# Default UI language (Chinese) and theme (FanchmWrt)
+uci -q batch <<-EOF
+	set luci.main.lang='zh_cn'
+	set luci.main.mediaurlbase='/luci-static/fanchmwrt'
+	commit luci
+EOF
+exit 0
