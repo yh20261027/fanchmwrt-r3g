@@ -49,6 +49,18 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Break weechat recursive dependency cycle
+        # The pinned luci feed has a kconfig cycle:
+        #   luci-app-weechat -> weechat-full -> weechat-minimal -> luci-app-weechat
+        # When kconfig hits it during `make defconfig`, all user package
+        # selections listed after that point are silently dropped.
+        # Weechat is an IRC chat client, not needed here -> remove it.
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds uninstall luci-app-weechat || true
+          rm -rf package/feeds/luci/luci-app-weechat
+          ls package/feeds/luci/ | grep -c weechat || echo "weechat removed OK"
+
       - name: Apply FanchmWrt LuCI feed patches
         run: |
           if [ -d openwrt/feeds_patches/luci ]; then
@@ -67,14 +79,39 @@ jobs:
           echo "=== Target ==="
           grep -E '^CONFIG_TARGET' .config
           echo "=== Custom packages check ==="
+          MISSING=0
           for sym in CONFIG_PACKAGE_luci-app-autoreboot \
                      CONFIG_PACKAGE_kmod-usb-net-rndis \
                      CONFIG_PACKAGE_kmod-usb-net-qmi-wwan \
+                     CONFIG_PACKAGE_kmod-usb-net-cdc-mbim \
+                     CONFIG_PACKAGE_kmod-usb-net-rtl8152 \
+                     CONFIG_PACKAGE_uqmi \
+                     CONFIG_PACKAGE_umbim \
+                     CONFIG_PACKAGE_usb-modeswitch \
                      CONFIG_PACKAGE_luci-proto-wireguard \
+                     CONFIG_PACKAGE_luci-proto-qmi \
+                     CONFIG_PACKAGE_luci-proto-mbim \
+                     CONFIG_PACKAGE_luci-proto-ncm \
+                     CONFIG_PACKAGE_luci-proto-3g \
+                     CONFIG_PACKAGE_qrencode \
+                     CONFIG_PACKAGE_luci-app-ddns \
+                     CONFIG_PACKAGE_kmod-wireguard \
+                     CONFIG_PACKAGE_wireguard-tools \
                      CONFIG_PACKAGE_luci-theme-fanchmwrt \
-                     CONFIG_PACKAGE_luci-app-fwx-dashboard; do
-            grep -q "^$sym=y" .config && echo "OK  $sym" || echo "MISSING  $sym"
+                     CONFIG_PACKAGE_luci-app-fwx-dashboard \
+                     CONFIG_PACKAGE_luci-i18n-base-zh-cn; do
+            if grep -q "^$sym=y" .config; then
+              echo "OK  $sym"
+            else
+              echo "MISSING  $sym"
+              MISSING=$((MISSING+1))
+            fi
           done
+          if [ "$MISSING" -gt 0 ]; then
+            echo "=== $MISSING required packages missing, aborting ==="
+            grep -E "luci-proto|qrencode|weechat" .config || true
+            exit 1
+          fi
 
       - name: Build firmware
         working-directory: openwrt
