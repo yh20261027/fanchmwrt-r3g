@@ -1,0 +1,101 @@
+name: Build FanchmWrt for Xiaomi Mi Router 3G
+
+on:
+  workflow_dispatch:
+
+env:
+  FANCHMWRT_REPO: https://github.com/fanchmwrt/fanchmwrt.git
+  FANCHMWRT_BRANCH: fanchmwrt-25.12.6
+  TARGET_DIR: bin/targets/ramips/mt7621
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+            /opt/ghc /usr/local/share/boost /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev \
+            python3-distutils python3-pyelftools python3-setuptools \
+            rsync swig unzip zlib1g-dev time
+
+      - name: Clone FanchmWrt source
+        run: |
+          git clone --depth 1 -b "$FANCHMWRT_BRANCH" "$FANCHMWRT_REPO" openwrt
+
+      - name: Apply local overlay (custom packages, config, rootfs files)
+        run: |
+          cp -rv overlay/package/. openwrt/package/
+          cp -v  config/r3g.config openwrt/.config
+          mkdir -p openwrt/files
+          cp -rv files/. openwrt/files/
+
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply FanchmWrt LuCI feed patches
+        run: |
+          if [ -d openwrt/feeds_patches/luci ]; then
+            if [ -d openwrt/feeds_patches/luci/applications ]; then
+              cp -rv openwrt/feeds_patches/luci/applications/. openwrt/feeds/luci/applications/ || true
+            fi
+            if [ -d openwrt/feeds_patches/luci/modules ]; then
+              cp -rv openwrt/feeds_patches/luci/modules/. openwrt/feeds/luci/modules/ || true
+            fi
+          fi
+
+      - name: Configure firmware
+        working-directory: openwrt
+        run: |
+          make defconfig
+          echo "=== Target ==="
+          grep -E '^CONFIG_TARGET' .config
+          echo "=== Custom packages check ==="
+          for sym in CONFIG_PACKAGE_luci-app-autoreboot \
+                     CONFIG_PACKAGE_kmod-usb-net-rndis \
+                     CONFIG_PACKAGE_kmod-usb-net-qmi-wwan \
+                     CONFIG_PACKAGE_luci-proto-wireguard \
+                     CONFIG_PACKAGE_luci-theme-fanchmwrt \
+                     CONFIG_PACKAGE_luci-app-fwx-dashboard; do
+            grep -q "^$sym=y" .config && echo "OK  $sym" || echo "MISSING  $sym"
+          done
+
+      - name: Build firmware
+        working-directory: openwrt
+        run: |
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Collect build outputs
+        if: always()
+        run: |
+          mkdir -p artifact
+          cp openwrt/$TARGET_DIR/sha256sums artifact/ 2>/dev/null || true
+          cp openwrt/$TARGET_DIR/*.manifest artifact/ 2>/dev/null || true
+          cp openwrt/$TARGET_DIR/*.bin artifact/ 2>/dev/null || true
+          # ipk packages, useful for opkg install later without rebuilding
+          tar czf artifact/ipk-packages.tar.gz -C openwrt/$TARGET_DIR/packages . 2>/dev/null || true
+          ls -lh artifact/ || true
+
+      - name: Upload firmware artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanchmwrt-mi-router-3g
+          path: artifact/
+          retention-days: 30
