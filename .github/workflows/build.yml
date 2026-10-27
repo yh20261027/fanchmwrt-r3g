@@ -81,6 +81,7 @@ jobs:
           echo "=== Custom packages check ==="
           MISSING=0
           for sym in CONFIG_PACKAGE_luci-app-autoreboot \
+                     CONFIG_PACKAGE_r3g-extras \
                      CONFIG_PACKAGE_kmod-usb-net-rndis \
                      CONFIG_PACKAGE_kmod-usb-net-qmi-wwan \
                      CONFIG_PACKAGE_kmod-usb-net-cdc-mbim \
@@ -93,6 +94,7 @@ jobs:
                      CONFIG_PACKAGE_luci-proto-mbim \
                      CONFIG_PACKAGE_luci-proto-ncm \
                      CONFIG_PACKAGE_luci-proto-3g \
+                     CONFIG_PACKAGE_libqrencode \
                      CONFIG_PACKAGE_qrencode \
                      CONFIG_PACKAGE_luci-app-ddns \
                      CONFIG_PACKAGE_kmod-wireguard \
@@ -109,7 +111,22 @@ jobs:
           done
           if [ "$MISSING" -gt 0 ]; then
             echo "=== $MISSING required packages missing, aborting ==="
-            grep -E "luci-proto|qrencode|weechat" .config || true
+            echo "=== DIAGNOSTIC: kconfig state of missing symbols ==="
+            for sym in luci-proto-wireguard luci-proto-qmi luci-proto-mbim \
+                       luci-proto-ncm luci-proto-3g libqrencode qrencode r3g-extras; do
+              echo "CONFIG_PACKAGE_$sym => $(grep -m1 "CONFIG_PACKAGE_$sym" .config || echo 'SYMBOL NOT FOUND')"
+            done
+            echo "=== DIAGNOSTIC: kconfig entries (raw) ==="
+            for sym in PACKAGE_luci-proto-qmi PACKAGE_luci-proto-ipv6 PACKAGE_r3g-extras; do
+              echo "--- $sym ---"
+              grep -n "$sym" tmp/.config-package.in | head -3 || echo "not in index"
+            done
+            echo "=== DIAGNOSTIC: full kconfig block around luci-proto-qmi ==="
+            ln=$(grep -n "config PACKAGE_luci-proto-qmi" tmp/.config-package.in | head -1 | cut -d: -f1)
+            [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
+            echo "=== DIAGNOSTIC: full kconfig block around luci-proto-ipv6 (reference: selectable) ==="
+            ln=$(grep -n "config PACKAGE_luci-proto-ipv6" tmp/.config-package.in | head -1 | cut -d: -f1)
+            [ -n "$ln" ] && sed -n "$((ln-4)),$((ln+14))p" tmp/.config-package.in || echo "no entry"
             exit 1
           fi
 
